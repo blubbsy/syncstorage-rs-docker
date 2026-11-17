@@ -1,32 +1,35 @@
 services:
   mariadb:
     container_name: firefox_mariadb
-    # 使用官方镜像，版本锁定到 10.6
-    image: mariadb:10.6
-    # 官方镜像的数据存储在由 Docker 管理的卷中，更稳定
+    # Upgraded to MariaDB 10.11 LTS (supported until Feb 2028).
+    # You can also use mariadb:11.4 (LTS until May 2029) or mariadb:10.6.
+    image: mariadb:10.11
+    restart: unless-stopped
     volumes:
       - mariadb_data:/var/lib/mysql
-      # 官方镜像的标准初始化脚本路径
       - ./data/initdb.d/init.sql:/docker-entrypoint-initdb.d/init.sql
-    restart: unless-stopped
     environment:
       MYSQL_USER: sync
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-    # 添加 healthcheck，让 syncserver 等到数据库完全就绪后再启动
+      # Automatically upgrades table structures when upgrading across MariaDB series
+      MARIADB_AUTO_UPGRADE: "1"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   syncserver:
     container_name: firefox_syncserver
-    build: ./app/
+    build:
+      context: ./app/
+      args:
+        # Pinned to latest stable release; can be overridden via .env
+        SYNC_VERSION: ${SYNC_VERSION:-0.25.0}
     restart: unless-stopped
     ports:
-      - "8000:8000"
-    # 修改 depends_on，利用上面的 healthcheck
+      - "5000:8000"
     depends_on:
       mariadb:
         condition: service_healthy
@@ -45,11 +48,10 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_SYNCSTORAGE_NAME: ${DB_SYNCSTORAGE_NAME}
       DB_TOKENSERVER_NAME: ${DB_TOKENSERVER_NAME}
-      
+
       # Full URLs constructed for the application
       SYNC_SYNCSTORAGE_DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_SYNCSTORAGE_NAME}
       SYNC_TOKENSERVER_DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_TOKENSERVER_NAME}
 
-# 定义 mariadb_data 卷
 volumes:
   mariadb_data:

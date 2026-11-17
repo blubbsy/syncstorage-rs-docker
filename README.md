@@ -1,90 +1,158 @@
-# SyncStorage-RS-Docker (fixed and enhanced version)
+# Firefox SyncStorage-RS Docker
 
-This warehouse is a Fork of [Dan-r/syncstorage-RS-docker] (https://github.com/Dan-r/syncstorage-RS-docker). The original project provided a good starting point for building the Firefox Sync server, but there were some challenges in the actual deployment process, such as long construction time, large image size, incompatible environment and unreliable database initialization.
+A reliable, production-ready, and automated Docker deployment for the official [Mozilla Firefox Sync Server (`syncstorage-rs`)](https://github.com/mozilla-services/syncstorage-rs).
 
-This Fork warehouse contains a series of key fixes and architecture improvements, aiming at providing a * * out-of-the-box, stable, reliable and easy to maintain * * deployment scheme of Firefox synchronization server.
+---
 
-# # Core improvement
+## Acknowledgments & Lineage
 
-Compared with the original warehouse, this warehouse has the following enhancements:
+This project builds upon the work of several open-source community contributors:
+- **Mozilla Services**: Creators of the official Rust [`syncstorage-rs`](https://github.com/mozilla-services/syncstorage-rs) codebase.
+- **[jinkang06](https://github.com/jinkang06/syncstorage-rs-docker)**: Re-architected multi-stage Docker builds, unified Bookworm OS environments, and introduced official MariaDB initialization.
+- **[Dan-r](https://github.com/Dan-r/syncstorage-RS-docker)**: The original docker-compose packaging implementation for `syncstorage-rs`.
 
-1. ** Multi-stage Docker build * *
-* completely rewritten ` app/Dockerfile' and adopted multi-stage construction strategy.
-* * * Results * *: The final image size of' syncserver' was greatly reduced from **~2GB+** of the original version to **~500MB**, at the same time, it was more efficient to build cache and the secondary construction speed was faster.
+### Enhancements in this Repository (`blubbsy/syncstorage-rs-docker`):
+- **MariaDB 10.11 LTS**: Upgraded from 10.6 to MariaDB 10.11 with automatic schema upgrade flags and robust container health checks (`healthcheck.sh`).
+- **Debian Trixie Runtime**: Updated to modern compiler toolchains, Rust 1.98+, and Python 3.13 integration (`libpython3.13`).
+- **TLS Client Fixes**: Handled non-interactive client SSL connection requirements (`--skip-ssl`) across container networks.
+- **Automated CI/CD Release Pipeline**: Nightly GitHub Action workflow automatically checks upstream `mozilla-services/syncstorage-rs` for new releases, builds the container image in the cloud, and publishes it to GitHub Container Registry (`ghcr.io/blubbsy/syncstorage-rs-docker`).
+- **Watchtower Automated Updates**: Optional Watchtower service periodically checks GHCR and upgrades `firefox_syncserver` with zero local compilation load.
 
-2. ** Unified construction and operation environment * *
-* Building image (`Rust: 1.82-Bookworm`) and running image (`Debian: Bookworm`) are based on debian:bookworm system.
-* * * Result * *: The problem of conflict or missing of dynamic library versions such as `glibc', `libpython' and `libcurl' caused by environment mismatch was fundamentally solved.
+---
 
-3. ** Reliable database initialization * *
-* Changing MariaDB image from linuxserver/mariadb DB' to official `Maria DB: 10.6', its initialization process is more standard and transparent.
-* A' healthcheck' mechanism was added to MariaDB in' docker-compose.yaml' to ensure that' syncserver' was started only after the database was completely ready, thus eliminating the timing problem.
-* Using init.sql script to explicitly create database and authorization, which solved the possible permission problems in the original configuration.
+## Deployment Options
 
-4. ** Robust startup script and configuration * *
-* Simplify the variables in the `. env ` file and ` docker-compose.yaml' to make them clearer and easier to understand.
-* The script app/entrypoint.sh was optimized to make its responsibilities more single, and the syntax bug of the startup command was fixed.
+### Option 1: Pre-built Image (Recommended - Fast & Low Resource)
 
-5. ** Enhanced security * *
-* Added `. gitignore file, and ignored `. env` file by default to prevent sensitive information containing passwords and keys from being accidentally uploaded to the version library.
+Use this method to avoid compiling Rust on your server (saving 5–10 minutes of heavy CPU and memory usage):
 
-# # Quick Start
+In `docker-compose.yaml`:
+```yaml
+services:
+  mariadb:
+    container_name: firefox_mariadb
+    image: mariadb:10.11
+    restart: unless-stopped
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./data/initdb.d/init.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      MYSQL_USER: sync
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MARIADB_AUTO_UPGRADE: "1"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-Please follow these steps to deploy your own Firefox Sync server.
+  syncserver:
+    container_name: firefox_syncserver
+    image: ghcr.io/blubbsy/syncstorage-rs-docker:latest
+    restart: unless-stopped
+    ports:
+      - "5000:8000"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      LOGLEVEL: ${LOGLEVEL}
+      SYNC_URL: ${SYNC_URL}
+      SYNC_CAPACITY: ${SYNC_CAPACITY}
+      SYNC_MASTER_SECRET: ${SYNC_MASTER_SECRET}
+      METRICS_HASH_SECRET: ${METRICS_HASH_SECRET}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SYNCSTORAGE_NAME: ${DB_SYNCSTORAGE_NAME}
+      DB_TOKENSERVER_NAME: ${DB_TOKENSERVER_NAME}
+      SYNC_SYNCSTORAGE_DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_SYNCSTORAGE_NAME}
+      SYNC_TOKENSERVER_DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_TOKENSERVER_NAME}
 
-### Clone this warehouse
+  watchtower:
+    container_name: firefox_watchtower
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 86400 --cleanup firefox_syncserver
 
+volumes:
+  mariadb_data:
+```
+
+### Option 2: Local Source Build
+
+Build directly from source using the local `Dockerfile`:
 ```bash
-git clone https://github.com/jinkang06/syncstorage-rs-docker.git
+docker compose up -d --build
+```
+
+---
+
+## Quick Start Guide
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/blubbsy/syncstorage-rs-docker.git
 cd syncstorage-rs-docker
 ```
 
-### Environment Variables
-
-The Docker Compose file makes use of environment variables. To configure them, make a copy of example.env
-
+### 2. Configure Environment Variables
+Copy `example.env` to `.env`:
 ```bash
 cp example.env .env
 ```
-
-Now edit the new `.env` file to add configuration and secrets. Keep in mind the `SYNC_MASTER_SECRET` and `METRICS_HASH_SECRET` require 64 characters.
-
-### Initial Run
-
+Edit `.env` and fill in your secrets. Ensure `SYNC_MASTER_SECRET` and `METRICS_HASH_SECRET` are random 64-character hexadecimal strings:
 ```bash
-docker compose up -d --build && docker compose logs -f
+# Generate random 64-character hex secrets:
+openssl rand -hex 32
 ```
 
-The first time you run the application, it will do a few things:
-
-1. MariaDB container will be pulled and on first run it will load the `./data/init/init.sql` script that creates the required databases and user permissions. This will only run during the initial setup.
-
-2. Next the Dockerfile will build the syncserver app. This is a Rust app and all of the required dependencies will be loaded into the environment, as well as cloning the Mozilla syncstorage-rs repo. This will take several minutes.
-
-3. Once everything is compiled and configured you should see startup logs begin to appear. Subsequent runs of `docker compose up -d` will happen much faster because the build artifacts are cached. Data is persisted in the database (`./data/config`) between restarts.
-
-### Rebuilding Everything
-
-In the course of setting this up, you may need to tear down and rebuild your instance. To remove persisted data and artifacts, run the following.
-
+### 3. Start the Stack
 ```bash
-docker compose down
-docker image rm app-syncserver
-docker builder prune -af
-rm -rf ./data/config
+docker compose up -d
 ```
 
-This will delete the compiled Rust app and any cached layers, and also delete the database data.
+### 4. Verify the Installation
+Check that the heartbeat endpoint reports database status as `Ok`:
+```bash
+curl http://localhost:5000/__heartbeat__
+# Expected response:
+# {"version":"0.25.0","quota":{"enabled":false,"size":2097152000},"database":"Ok","status":"Ok"}
+```
 
-### Firefox Setup
+Check the active version:
+```bash
+curl http://localhost:5000/__version__
+```
 
-Once your app is running, you can configure Firefox by updating the `about:config` settings.
+---
 
-`identity.sync.tokenserver.uri` needs to be set to the `SYNC_URL` configured in your `.env` file followed by `/1.0/sync/1.5`. 
+## Firefox Client Setup
 
->Example: http://sync.example.com:8000/1.0/sync/1.5
+Once the server is running behind your reverse proxy (with HTTPS):
 
-To confirm the sync is working you can enable success logs in `about:config` also. Set `services.sync.log.appender.file.logOnSuccess` to true. Now you should see sync logs in `about:sync-log`
+1. Open Firefox and navigate to `about:config`.
+2. Accept the risk warning.
+3. Search for:
+   ```text
+   identity.sync.tokenserver.uri
+   ```
+4. Change its value to your server URL followed by `/1.0/sync/1.5`:
+   ```text
+   https://sync.yourdomain.com/1.0/sync/1.5
+   ```
+5. *(Optional debugging)* To view detailed sync logs in `about:sync-log`, set:
+   ```text
+   services.sync.log.appender.file.logOnSuccess = true
+   ```
+6. Sign in to your Firefox Account or trigger **Sync Now** from the Firefox menu.
 
-Syncing is usually very quick, and when a sync occurs you can see logs in `docker compose logs -f` also.
+---
 
+## License
+
+This project is open-source under the Mozilla Public License 2.0 (MPL-2.0), matching the upstream Mozilla `syncstorage-rs` codebase.
